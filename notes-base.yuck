@@ -1,0 +1,42 @@
+;; What notes.yuck uses from the rest of my eww config. Include this before notes.yuck if your
+;; config has none of it; if it already defines `eww`, `ic` or `look_seg`, leave the clashing
+;; part out (yours must then have the same shape: ic.note etc., look_seg with the same arguments).
+
+;; the eww binary, for the :onclick commands (scripts/notes has its own: EWW_BIN or ~/bin/eww)
+(defvar eww "$HOME/bin/eww")
+
+;; icons: Font Awesome 7 Free (Solid, and Regular for the empty to-do box), see notes-base.scss
+;; name / codepoint / used for:
+;;   note         f249  the panel, its bar button
+;;   close        f00d  close, clear, remove item
+;;   search       f002  search
+;;   plus         f067  new note, add items
+;;   pen          f304  edit
+;;   copy         f0c5  copy to the clipboard
+;;   check        f00c  copied
+;;   tag          f02b  tags
+;;   pin          f08d  pin (thumbtack)
+;;   trash        f1f8  delete
+;;   box          f0c8  to-do open (square; Regular weight = outline)
+;;   box_checked  f14a  to-do done
+(defvar ic '{
+  "note": "",
+  "close": "",
+  "search": "",
+  "plus": "",
+  "pen": "",
+  "copy": "",
+  "check": "",
+  "tag": "",
+  "pin": "",
+  "trash": "",
+  "box": "",
+  "box_checked": ""
+}')
+
+;; one segment of a row of raised buttons (List | New, Note | To-do list); :pos first / mid / last
+(defwidget look_seg [pos on text cmd ?dot]
+  (button :class "look-seg look-${pos} ${on ? 'on' : ''}" :timeout "2s" :onclick cmd
+    (box :space-evenly false :spacing 6 :halign "center"
+      (box :class "look-dot dot-${dot ?: 'none'}" :visible {(dot ?: "") != ""} :valign "center")
+      (label :text text))))

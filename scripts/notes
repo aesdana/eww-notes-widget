@@ -1,0 +1,364 @@
+#!/usr/bin/python3
+"""Notes panel (notes.yuck): a sliding panel on the left with notes and to-do lists.
+
+Storage:
+  ~/Documents/ewwnotes/notes/<id>.md   one note per file: a small header, then the text
+  ~/Documents/ewwnotes/.data/          state.json (search, draft), trash/ (deleted notes)
+
+  ---                                  ---
+  kind: text                           kind: todo
+  tags: work, ideas                    tags: home
+  pinned: false                        pinned: true
+  created: 2026-10-25 15:55            created: 2026-10-25 16:02
+  ---                                  ---
+  Call the bank about the card         # Groceries
+  (a note may have several lines)      - [ ] milk
+                                       - [x] bread
+
+Text typed into the panel comes on stdin (eww's input / textarea write it there), never on the
+command line. A note's text keeps its lines; titles, items, tags and the search are one line.
+
+  notes toggle | open | close     the panel (slides in / out)
+  notes refresh                   push the list to eww (var nt)
+  notes search                    stdin: keywords and #tags
+  notes tag NAME | clear          toggle #NAME in the search / empty the search
+  notes draft text|tags           stdin: the New form's fields, kept while typing
+  notes create [text|todo]        stdin (optional): the text; else the draft
+  notes check ID N | delitem ID N tick / remove to-do item N
+  notes compose MODE ID [N] | off the field under the list, for note ID: item (add to-do items),
+                                  tags, text (its text / the list's title), itemtext (item N)
+  notes additem ID                stdin: a new to-do item (the field stays open for the next)
+  notes settags ID                stdin: tags, comma or space separated
+  notes settext ID | setitem ID N stdin: the note's text (the list's title) / item N's text
+  notes copy ID                   the text (a list as Markdown) to the clipboard
+  notes pin ID | delete ID        pin to the top / move to .data/trash
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser('~')
+ROOT = f'{HOME}/Documents/ewwnotes'
+NOTES = f'{ROOT}/notes'
+DATA = f'{ROOT}/.data'
+STATE = f'{DATA}/state.json'
+EWW = os.environ.get('EWW_BIN', f'{HOME}/bin/eww')
+SLIDE = 0.25          # revealer duration in notes.yuck
+TOP_TAGS = 3          # tag chips under the search (more: type #tag)
+
+
+# ---------------------------------------------------------------- storage
+def load(nid):
+    text = open(f'{NOTES}/{nid}.md', encoding='utf-8').read()
+    head, body = {}, text
+    m = re.match(r'---\n(.*?)\n---\n?(.*)\Z', text, re.S)
+    if m:
+        for line in m.group(1).splitlines():
+            k, _, v = line.partition(':')
+            head[k.strip()] = v.strip()
+        body = m.group(2)
+    note = {'id': nid, 'kind': head.get('kind', 'text'),
+            'tags': split_tags(head.get('tags', '')),
+            'pinned': head.get('pinned') == 'true', 'created': head.get('created', ''),
+            'text': '', 'title': '', 'items': []}
+    lines = [x for x in body.splitlines() if x.strip()]
+    if note['kind'] == 'todo':
+        for x in lines:
+            item = re.match(r'- \[( |x)\] (.*)', x)
+            if item:
+                note['items'].append({'i': len(note['items']), 'done': item.group(1) == 'x',
+                                      'text': item.group(2)})
+            elif x.startswith('# '):
+                note['title'] = x[2:].strip()
+    else:
+        note['text'] = clean_lines(body)
+    return note
+
+
+def clean_lines(text):
+    """trailing spaces and blank lines at the start / end off; blank lines inside stay"""
+    return '\n'.join(x.rstrip() for x in text.splitlines()).strip('\n')
+
+
+def save(note):
+    head = (f"---\nkind: {note['kind']}\ntags: {', '.join(note['tags'])}\n"
+            f"pinned: {'true' if note['pinned'] else 'false'}\ncreated: {note['created']}\n---\n")
+    if note['kind'] == 'todo':
+        body = (f"# {note['title']}\n" if note['title'] else '') + ''.join(
+            f"- [{'x' if i['done'] else ' '}] {i['text']}\n" for i in note['items'])
+    else:
+        body = note['text'] + '\n'
+    tmp = f"{NOTES}/.{note['id']}.tmp"
+    open(tmp, 'w', encoding='utf-8').write(head + body)
+    os.replace(tmp, f"{NOTES}/{note['id']}.md")
+
+
+def all_notes():
+    out = []
+    for f in os.listdir(NOTES):
+        if f.endswith('.md'):
+            try:
+                out.append(load(f[:-3]))
+            except (OSError, UnicodeDecodeError):
+                pass
+    return out
+
+
+def split_tags(s):
+    """'#Work, ideas home' -> ['work', 'ideas', 'home']: letters, digits, - and _ only (tags end up
+    in eww commands)"""
+    seen = []
+    for t in re.split(r'[,\s]+', s):
+        t = re.sub(r'[^\w-]', '', t.lower())
+        if t and t not in seen:
+            seen.append(t)
+    return seen
+
+
+def state():
+    try:
+        return json.load(open(STATE))
+    except (OSError, ValueError):
+        return {}
+
+
+def set_state(**kw):
+    s = state()
+    s.update(kw)
+    json.dump(s, open(STATE, 'w'))
+    return s
+
+
+def stdin_text(multiline=False):
+    """the text eww writes to stdin: one line (spaces squeezed), or a note's lines"""
+    if sys.stdin.isatty():
+        return ''
+    text = sys.stdin.read()
+    return clean_lines(text) if multiline else ' '.join(text.split())
+
+
+def label_text(text):
+    """eww's label reads backslash escapes (\\n, \\t, …) in its text: double the backslashes.
+    A blank line gets a space: GTK measures a wrapping label with an empty line too short, and the
+    card's buttons below would end up under the text."""
+    text = text.replace('\\', '\\\\')
+    return '\n'.join(x or ' ' for x in text.split('\n'))
+
+
+# ---------------------------------------------------------------- eww
+def eww(*args):
+    subprocess.run([EWW, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def eww_get(var):
+    return subprocess.run([EWW, 'get', var], capture_output=True, text=True).stdout.strip()
+
+
+def matches(n, words, tags):
+    if any(t not in n['tags'] for t in tags):
+        return False
+    hay = ' '.join([n['text'], n['title'], *(i['text'] for i in n['items']), *n['tags']]).lower()
+    return all(w in hay for w in words)
+
+
+def refresh():
+    notes = all_notes()
+    notes.sort(key=lambda n: n['id'], reverse=True)          # newest first …
+    notes.sort(key=lambda n: not n['pinned'])                # … pinned above (stable sort)
+    query = state().get('query', '')
+    tags = [t.lstrip('#').lower() for t in query.split() if t.startswith('#') and len(t) > 1]
+    words = [w.lower() for w in query.split() if not w.startswith('#')]
+    shown = [n for n in notes if matches(n, words, tags)]
+    counts = {}
+    for n in notes:
+        for t in n['tags']:
+            counts[t] = counts.get(t, 0) + 1
+    for n in shown:
+        n['done'] = sum(i['done'] for i in n['items'])
+        # what the labels show (see label_text)
+        n['show'] = label_text(n['title'] or 'To-do' if n['kind'] == 'todo' else n['text'])
+        for i in n['items']:
+            i['show'] = label_text(i['text'])
+    # tag chips under the search: the most used ones, and those the search uses (to switch them off)
+    top = sorted(counts, key=lambda t: (-counts[t], t))[:TOP_TAGS]
+    chips = [{'name': t, 'count': counts[t], 'on': t in tags}
+             for t in top + [t for t in tags if t in counts and t not in top]]
+    # while a note is being edited, the list comes in three parts: the field goes between the note
+    # and the rest (notes.yuck nt_list; outside eww's loops, so it keeps the focus)
+    target = state().get('target')
+    at = next((i for i, n in enumerate(shown) if n['id'] == target), None)
+    before, editing, after = ((shown, [], []) if at is None
+                              else (shown[:at], [shown[at]], shown[at + 1:]))
+    eww('update', 'nt=' + json.dumps({
+        'before': before, 'editing': editing, 'after': after,
+        'count': len(notes), 'shown': len(shown), 'query': query,
+        'tags': chips,
+    }))
+
+
+def close_field():
+    """the field for adding items / editing goes away"""
+    set_state(target=None)
+    eww('update', 'nt_compose=', 'nt_target=', 'nt_index=', 'nt_multi=false')
+
+
+def set_query(q):
+    set_state(query=q)
+    eww('update', f'nt_q={q}')          # the search field shows it (only on chip / clear clicks)
+    refresh()
+
+
+def blank():
+    """empty the inputs (their :value is nt_blank; set it to something else first)"""
+    eww('update', 'nt_blank= ')
+    eww('update', 'nt_blank=')
+
+
+def windows():
+    return subprocess.run([EWW, 'active-windows'], capture_output=True, text=True).stdout
+
+
+# ---------------------------------------------------------------- commands
+def main(cmd, *a):
+    os.makedirs(NOTES, exist_ok=True)
+    os.makedirs(DATA, exist_ok=True)
+    if cmd in ('toggle', 'open', 'close'):
+        is_open = re.search(r'^notes:', windows(), re.M) is not None
+        if cmd == 'toggle':
+            cmd = 'close' if is_open else 'open'
+        if cmd == 'open' and not is_open:
+            set_state(target=None)                        # nothing being edited: one list
+            refresh()
+            eww('update', f"nt_q={state().get('query', '')}", 'nt_view=list', 'nt_compose=',
+                'nt_copied=')
+            eww('open', 'notes')
+            eww('update', 'notes_open=true')
+        elif cmd == 'close' and is_open:
+            eww('update', 'notes_open=false')
+            time.sleep(SLIDE)
+            eww('close', 'notes')
+        return
+    if cmd == 'refresh':
+        return refresh()
+    if cmd == 'search':
+        set_state(query=stdin_text())
+        return refresh()
+    if cmd == 'tag':
+        name = a[0].lower()
+        words = state().get('query', '').split()
+        words = ([w for w in words if w.lower() != f'#{name}']
+                 if f'#{name}' in (w.lower() for w in words) else words + [f'#{name}'])
+        return set_query(' '.join(words))
+    if cmd == 'clear':
+        return set_query('')
+    if cmd == 'compose':
+        if a[0] == 'off':
+            close_field()
+            return refresh()
+        mode, note = a[0], load(a[1])
+        name = (note['title'] or note['text'] or 'To-do').split('\n')[0]
+        name = name if len(name) <= 30 else name[:29] + '…'
+        index = a[2] if len(a) > 2 else ''
+        caption, value = {
+            'item': (f'Add to {name}', ''),
+            'tags': (f'Tags of {name}', ', '.join(note['tags'])),
+            'text': ('Title of the list' if note['kind'] == 'todo'
+                     else 'Edit the note · Ctrl+Enter saves',
+                     note['title'] if note['kind'] == 'todo' else note['text']),
+            'itemtext': (f'Edit the item of {name}',
+                         note['items'][int(index)]['text'] if index else ''),
+        }[mode]
+        # empty first: the field takes the text again even when it is the same as last time
+        eww('update', 'nt_fieldval=')
+        # a text note's text is edited in the multi-line field (nt_multi), the rest in one line
+        multi = 'true' if mode == 'text' and note['kind'] == 'text' else 'false'
+        set_state(target=note['id'])
+        eww('update', f'nt_compose={mode}', f'nt_target={note["id"]}', f'nt_index={index}',
+            f'nt_caption={caption}', f'nt_fieldval={value}', f'nt_multi={multi}')
+        return refresh()                                  # the field moves under this note
+    if cmd == 'draft':
+        draft = state().get('draft', {})
+        draft[a[0]] = stdin_text(multiline=a[0] == 'text')
+        set_state(draft=draft)
+        return
+    if cmd == 'create':
+        draft = state().get('draft', {})
+        kind = a[0] if a else 'text'
+        text = stdin_text(multiline=kind == 'text') or draft.get('text', '')
+        if kind == 'todo':
+            text = ' '.join(text.split())                # a list's title: one line
+        if not text:
+            return
+        nid = time.strftime('%Y%m%d-%H%M%S')
+        while os.path.exists(f'{NOTES}/{nid}.md'):          # two in the same second
+            nid += 'a'
+        save({'id': nid, 'kind': kind, 'tags': split_tags(draft.get('tags', '')),
+              'pinned': False, 'created': time.strftime('%Y-%m-%d %H:%M'),
+              'text': text if kind == 'text' else '', 'title': text if kind == 'todo' else '',
+              'items': []})
+        set_state(draft={})
+        blank()
+        eww('update', 'nt_view=list')
+        return refresh()
+
+    note = load(a[0])
+    if cmd == 'check':
+        it = note['items'][int(a[1])]
+        it['done'] = not it['done']
+    elif cmd == 'delitem':
+        del note['items'][int(a[1])]
+        # an item being edited may have moved up: close the field
+        if (eww_get('nt_compose') == 'itemtext' and eww_get('nt_target') == note['id']):
+            close_field()
+    elif cmd == 'additem':
+        text = stdin_text()
+        if not text:
+            return
+        note['items'].append({'i': len(note['items']), 'done': False, 'text': text})
+        blank()
+    elif cmd == 'settags':
+        note['tags'] = split_tags(stdin_text())
+        close_field()
+    elif cmd in ('settext', 'setitem'):
+        text = stdin_text(multiline=cmd == 'settext' and note['kind'] == 'text')
+        if not text:                                     # an empty field never wipes a note
+            return
+        if cmd == 'setitem':
+            note['items'][int(a[1])]['text'] = text
+        elif note['kind'] == 'todo':
+            note['title'] = text
+        else:
+            note['text'] = text
+        close_field()
+    elif cmd == 'copy':
+        if note['kind'] == 'todo':
+            text = (f"# {note['title']}\n" if note['title'] else '') + ''.join(
+                f"- [{'x' if i['done'] else ' '}] {i['text']}\n" for i in note['items'])
+        else:
+            text = note['text']
+        subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode(),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        eww('update', f"nt_copied={note['id']}")       # a check mark for a moment
+        subprocess.Popen(['sh', '-c', f'sleep 1.5; "{EWW}" update nt_copied='],
+                         start_new_session=True, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return
+    elif cmd == 'pin':
+        note['pinned'] = not note['pinned']
+    elif cmd == 'delete':
+        os.makedirs(f'{DATA}/trash', exist_ok=True)
+        shutil.move(f"{NOTES}/{note['id']}.md", f"{DATA}/trash/{note['id']}.md")
+        close_field()
+        return refresh()
+    save(note)
+    refresh()
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    main(*sys.argv[1:])

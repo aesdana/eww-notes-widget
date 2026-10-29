@@ -1,0 +1,197 @@
+;; Notes: a full-height panel that slides in from the left (scripts/notes toggle). Notes (several
+;; lines) and to-do lists with tags, a keyword / #tag search. Storage: ~/Documents/ewwnotes.
+;; Needs eww built with eww-textarea.patch: the multi-line `textarea`, `:selectable`
+;; labels, and fields that write their text to the command's stdin. scripts/notes reads it from
+;; there, so a note's text never becomes part of a shell command line (never use {} for it).
+
+(defvar notes_open false)   ; panel slid in (scripts/notes open / close)
+(defvar nt '{"before":[],"editing":[],"after":[],"tags":[],"count":0,"shown":0,"query":""}')   ; pushed by scripts/notes
+(defvar nt_view "list")     ; list | new
+(defvar nt_kind "text")     ; New: text | todo
+(defvar nt_compose "")      ; the field under the list (scripts/notes compose): "" (hidden) | item (add
+                            ; to-do items) | tags | text (the note's text / list's title) | itemtext
+(defvar nt_target "")       ; … for this note
+(defvar nt_index "")        ; … and this item (itemtext)
+(defvar nt_caption "")      ; … its caption ("Add to Groceries")
+(defvar nt_fieldval "")     ; … its text when it edits something (tags, text, item)
+(defvar nt_multi false)     ; … in the multi-line field (a note's text)
+(defvar nt_copied "")       ; id of the note just copied (its copy icon turns into a check)
+(defvar nt_q "")            ; the search field's text, set by tag / clear clicks
+(defvar nt_blank "")        ; :value of the empty fields; scripts/notes clears them with it
+
+;; bar button, next to the launcher
+(defwidget notesw []
+  (button :class "pill notes-btn icon ${notes_open ? 'open' : ''}" :tooltip "Notes" :timeout "3s"
+          :onclick "scripts/notes toggle" {ic.note}))
+
+;; slides out of the left screen edge. :halign "start": the revealer only gets the width it asks for
+;; (that is what animates); in the fixed-size window it would get the full width at once, and the
+;; panel would just appear. The box's :width keeps the panel at the window's 340 px.
+(defwidget notes_panel []
+  (revealer :transition "slideright" :reveal notes_open :duration "250ms" :halign "start"
+    (box :class "popup notes-panel" :orientation "v" :space-evenly false :vexpand true :width 340
+      ;; head: title, List | New, close
+      (box :class "nt-head" :space-evenly false :spacing 8
+        (label :class "icon nt-head-icon" :text {ic.note})
+        (label :class "nt-title" :hexpand true :xalign 0 :text "Notes")
+        (box :space-evenly false
+          (look_seg :pos "first" :on {nt_view == "list"} :text "List" :cmd "${eww} update nt_view=list")
+          (look_seg :pos "last" :on {nt_view == "new"} :text "New" :cmd "${eww} update nt_view=new"))
+        (button :class "nt-act icon" :tooltip "Close" :timeout "2s" :onclick "scripts/notes close" {ic.close}))
+      (box :class "menu-sep")
+      (stack :selected {nt_view == "new" ? 1 : 0} :transition "crossfade" :same-size false :vexpand true
+        (nt_list)
+        (nt_new)))))
+
+;; ---- list: search, tag chips, the notes
+(defwidget nt_list []
+  (box :orientation "v" :space-evenly false :vexpand true
+    (box :class "nt-search" :space-evenly false :spacing 8
+      (label :class "icon nt-search-icon" :text {ic.search})
+      (input :class "nt-input" :hexpand true :value nt_q :timeout "2s"
+             :onchange "scripts/notes search")
+      (button :class "nt-act icon" :tooltip "Clear the search" :timeout "2s"
+              :onclick "scripts/notes clear </dev/null" {ic.close}))
+    ;; the 3 most used tags, and those in the search: click to search by it (again to drop it)
+    (scroll :class "nt-tags" :hscroll true :vscroll false
+      (box :space-evenly false :spacing 6
+        (for t in {nt.tags}
+          (button :class "nt-chip ${t.on ? 'on' : ''}" :timeout "2s" :tooltip "${t.count} × · click to filter"
+                  :onclick "scripts/notes tag ${t.name} </dev/null" "#${t.name}"))))
+    (scroll :class "nt-scroll" :hscroll false :vscroll true :vexpand true
+      (box :class "nt-list" :orientation "v" :space-evenly false :spacing 8
+        (revealer :reveal {nt.shown == 0} :transition "none"
+          (label :class "nt-empty" :xalign 0 :wrap true
+                 :text {nt.count == 0 ? "No notes yet · New adds one" : "Nothing matches the search"}))
+        ;; while a note is being edited: the notes above it, the note, the field, the notes below.
+        ;; Each loop in its own box (a rebuilt loop appends its cards at the end of its box), and
+        ;; the field outside the loops: eww rebuilds a loop's cards on every change, and a field in
+        ;; a card would lose the focus after each Enter.
+        (box :orientation "v" :space-evenly false :spacing 8
+          (for n in {nt.before}
+            (nt_note :n n)))
+        (box :orientation "v" :space-evenly false
+          (for n in {nt.editing}
+            (nt_note :n n)))
+        (nt_composer)
+        (box :orientation "v" :space-evenly false :spacing 8
+          (for n in {nt.after}
+            (nt_note :n n)))))
+    (label :class "nt-count" :xalign 0
+           :text {nt.query == "" ? "${nt.count} notes" : "${nt.shown} of ${nt.count} notes"})))
+
+;; one note: its text (selectable), or a to-do list (title, items); its tags, then its buttons
+(defwidget nt_note [n]
+  (box :class "nt-note ${n.pinned ? 'pinned' : ''}" :orientation "v" :space-evenly false :spacing 4
+    ;; the text alone in its row: next to buttons, GTK gave a wrapping label one line too few
+    ;; (the footer then sat on its last line)
+    (label :class "${n.kind == 'todo' ? 'nt-todo-title' : 'nt-text'}" :xalign 0 :wrap true
+           :selectable true :unindent false :text {n.show})
+    ;; items: click ticks; the pencil and × show while the pointer is on the row
+    (for it in {n.items}
+      (eventbox :class "nt-row"
+        (box :space-evenly false :spacing 2
+          (button :class "nt-item ${it.done ? 'done' : ''}" :hexpand true :timeout "2s"
+                  :tooltip "Click: done / not done"
+                  :onclick "scripts/notes check ${n.id} ${it.i} </dev/null"
+            (box :space-evenly false :spacing 8
+              (label :class "icon nt-box ${it.done ? '' : 'open'}" :valign "start"
+                     :text {it.done ? ic.box_checked : ic.box})
+              (label :class "nt-item-text" :hexpand true :xalign 0 :wrap true :unindent false :text {it.show})))
+          (button :class "nt-act nt-row-act icon ${nt_compose == 'itemtext' && nt_target == n.id && nt_index == it.i ? 'on' : ''}"
+                  :valign "start" :timeout "2s" :tooltip "Edit"
+                  :onclick "scripts/notes compose itemtext ${n.id} ${it.i} </dev/null" {ic.pen})
+          (button :class "nt-act nt-row-act nt-del icon" :valign "start" :timeout "2s" :tooltip "Remove"
+                  :onclick "scripts/notes delitem ${n.id} ${it.i} </dev/null" {ic.close}))))
+    (revealer :reveal {arraylength(n.tags) > 0} :transition "none"
+      (box :class "nt-chips" :space-evenly false :spacing 6
+        (for t in {n.tags}
+          (button :class "nt-chip small" :timeout "2s" :tooltip "Search by this tag"
+                  :onclick "scripts/notes tag ${t} </dev/null" "#${t}"))))
+    ;; footer: a list's progress on the left; buttons on the right: add items (lists), edit, copy,
+    ;; tags, pin, delete
+    (box :class "nt-foot" :space-evenly false :spacing 2
+      (label :class "nt-progress" :hexpand true :xalign 0
+             :text {n.kind == "todo" && arraylength(n.items) > 0 ? "${n.done}/${arraylength(n.items)} done" : ""})
+      (nt_act :show {n.kind == "todo"} :on {nt_compose == "item" && nt_target == n.id} :icon {ic.plus}
+              :tip "Add items" :cmd "scripts/notes compose item ${n.id}")
+      (nt_act :on {nt_compose == "text" && nt_target == n.id} :icon {ic.pen}
+              :tip {n.kind == "todo" ? "Rename the list" : "Edit the note"} :cmd "scripts/notes compose text ${n.id}")
+      (nt_act :on {nt_copied == n.id} :icon {nt_copied == n.id ? ic.check : ic.copy}
+              :tip {n.kind == "todo" ? "Copy (the list as Markdown)" : "Copy the text"} :cmd "scripts/notes copy ${n.id}")
+      (nt_act :on {nt_compose == "tags" && nt_target == n.id} :icon {ic.tag}
+              :tip "Edit tags" :cmd "scripts/notes compose tags ${n.id}")
+      (nt_act :on {n.pinned} :icon {ic.pin} :tip {n.pinned ? "Unpin" : "Pin to the top"}
+              :cmd "scripts/notes pin ${n.id}")
+      (nt_act :del true :icon {ic.trash} :tip "Delete (kept in ~/Documents/ewwnotes/.data/trash)"
+              :cmd "scripts/notes delete ${n.id}"))))
+
+;; a card's small icon button (:show false leaves it out)
+(defwidget nt_act [icon tip cmd ?on ?del ?show]
+  (revealer :reveal {show ?: true} :transition "none"
+    (button :class "nt-act icon ${on ?: false ? 'on' : ''} ${del ?: false ? 'nt-del' : ''}" :timeout "2s"
+            :tooltip tip :onclick "${cmd} </dev/null" icon)))
+
+;; the field for adding to-do items and for editing tags, a note's text or an item: right under
+;; the note being edited (nt_list), outside eww's loops. When it edits, it starts with the current
+;; text. A note's text gets a multi-line field (Enter: new line, Ctrl+Enter: save), everything
+;; else one line (Enter saves).
+(defwidget nt_composer []
+  (revealer :reveal {nt_compose != ""} :transition "slideup" :duration "150ms"
+    (box :class "nt-composer" :orientation "v" :space-evenly false :spacing 4
+      (box :space-evenly false :spacing 8
+        (label :class "icon nt-field-icon"
+               :text {nt_compose == "tags" ? ic.tag : nt_compose == "item" ? ic.plus : ic.pen})
+        (label :class "nt-caption" :hexpand true :xalign 0 :limit-width 34 :text nt_caption)
+        (button :class "nt-act icon" :tooltip "Done" :timeout "2s"
+                :onclick "scripts/notes compose off </dev/null" {ic.close}))
+      (revealer :reveal {!nt_multi} :transition "none"
+        (input :class "nt-input" :value {nt_compose == "item" ? nt_blank : nt_fieldval} :timeout "2s"
+               :onaccept "scripts/notes ${nt_compose == 'tags' ? 'settags' : nt_compose == 'text' ? 'settext' : nt_compose == 'itemtext' ? 'setitem' : 'additem'} ${nt_target} ${nt_index}"))
+      (revealer :reveal nt_multi :transition "none"
+        (scroll :class "nt-area" :hscroll false :vscroll true :height 140
+          (textarea :class "nt-textarea" :value nt_fieldval :timeout "2s"
+                    :onaccept "scripts/notes settext ${nt_target}"))))))
+
+;; ---- new: kind, the text (several lines) or the list's title (one), tags
+;; in a scroll area like the list: a wrapping label asks for its whole text as one line, and the
+;; sliding revealer would give the panel that width (wider than the window)
+(defwidget nt_new []
+  (scroll :hscroll false :vscroll true :vexpand true
+  (box :class "nt-new" :orientation "v" :space-evenly false :spacing 2 :valign "start"
+    (box :class "look-row nt-kind"
+      (look_seg :pos "first" :on {nt_kind == "text"} :text "Note" :cmd "${eww} update nt_kind=text")
+      (look_seg :pos "last" :on {nt_kind == "todo"} :text "To-do list" :cmd "${eww} update nt_kind=todo"))
+    (label :class "nt-caption" :xalign 0 :text {nt_kind == "todo" ? "Title" : "Note"})
+    (revealer :reveal {nt_kind == "text"} :transition "none"
+      (scroll :class "nt-area" :hscroll false :vscroll true :height 140
+        (textarea :class "nt-textarea" :value nt_blank :timeout "2s"
+                  :onchange "scripts/notes draft text"
+                  :onaccept "scripts/notes create text")))
+    (revealer :reveal {nt_kind == "todo"} :transition "none"
+      (input :class "nt-input" :value nt_blank :timeout "2s"
+             :onchange "scripts/notes draft text"
+             :onaccept "scripts/notes create todo"))
+    (label :class "nt-caption" :xalign 0 :text "Tags")
+    ;; Enter here creates from the draft: </dev/null, or the tags would be read as the note's text
+    (input :class "nt-input" :value nt_blank :timeout "2s"
+           :onchange "scripts/notes draft tags"
+           :onaccept "scripts/notes create ${nt_kind} </dev/null")
+    (label :class "nt-hint" :xalign 0 :wrap true
+           :text {nt_kind == "todo" ? "Comma or space separated. Enter creates the list; its items are added in the list." : "Comma or space separated. Ctrl+Enter in the note (or Enter here) creates it."})
+    (button :class "nt-create" :timeout "2s" :onclick "scripts/notes create ${nt_kind} </dev/null"
+      (box :space-evenly false :spacing 8 :halign "center"
+        (label :class "icon" :text {ic.plus})
+        (label :text "Create"))))))
+
+;; managed by the window manager (not :wm-ignore): only then does a click give it the keyboard
+;; focus on X11. Flush with the left screen edge (x 0); full height of the 1080 px screen below
+;; the bar: 1080 - 46 - 6.
+(defwindow notes
+  :monitor '["<primary>", 0]'
+  :geometry (geometry :x "0px" :y "46px" :width "340px" :height "1028px" :anchor "top left")
+  :stacking "fg"
+  :wm-ignore false
+  :windowtype "dialog"
+  :focusable true
+  (notes_panel))

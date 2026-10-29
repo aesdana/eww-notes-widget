@@ -1,0 +1,92 @@
+// What notes.scss uses from the rest of my eww config: colours (the Catpine theme), the 3D mixins,
+// the dropdown frame, the icon font, the separator and the List | New buttons. Import it right
+// before notes.scss. The colours are !default: set your own before the import to change them.
+// The rules only match the notes widgets, so the rest of your config keeps its look.
+
+// ---------- colours
+$bar:        #332f46 !default;
+$pill:       #393552 !default;   // buttons, note cards
+$popup:      #332f46 !default;   // the panel
+$border:     #504c65 !default;   // separator
+$trough:     #2a273f !default;   // text fields
+$menu-hover: #393552 !default;   // hovered small buttons
+$text:       #c4c6e8 !default;
+$subtle:     #9d9bbe !default;   // secondary
+$muted:      #767094 !default;   // done items, hints
+$accent:     #c3a6f6 !default;   // "on", pinned, check boxes
+$grad-b:     #a5b7f6 !default;   // the notes icon
+$c-danger:   #f5bde6 !default;   // delete
+$ring-dark-amount: 6% !default;  // panel frame: outer border, darker than the panel
+$ring-light-amount: 6% !default; // … and the inner ring, lighter
+
+// ---------- fonts (the icons need Font Awesome 7 Free: Solid, and Regular for the empty to-do box)
+$font-text: "Roboto Condensed" !default;
+$font-size: 12pt !default;
+$font-icon: "Font Awesome 7 Free" !default;
+$icon-weight: 900 !default;      // Solid
+$icon-size: 12pt !default;
+
+// ---------- 3D edges, from each element's own colour (inset shadows: nothing changes size)
+$bevel-dark: 6% !default;
+$bevel-light: 6% !default;
+@mixin raised($s) {                // light bands (strongest at the top), dark outer ring
+  background-color: $s;
+  box-shadow: inset 0 2px 0 0 lighten($s, $bevel-light),
+              inset 2px 0 0 0 lighten($s, $bevel-light * 0.7),
+              inset -2px 0 0 0 lighten($s, $bevel-light * 0.7),
+              inset 0 -2px 0 0 lighten($s, $bevel-light * 0.35),
+              inset 0 0 0 1px darken($s, $bevel-dark);
+}
+@mixin hover($s) { @include raised(lighten($s, 3%)); }
+@mixin pressed($s) {               // dark inner ring, light outer ring on left, right and bottom
+  background-color: darken($s, 1.5%);
+  box-shadow: inset 0 0 0 2px darken($s, 5%),
+              inset 1px 0 0 0 lighten($s, 3%),
+              inset -1px 0 0 0 lighten($s, 3%),
+              inset 0 -1px 0 0 lighten($s, 3%);
+}
+
+// ---------- base rules, only for the panel and its bar button
+// no GTK theme styling (my config does this for everything with `* { all: unset; }`)
+.notes-panel, .notes-panel *, .notes-btn, .notes-btn * { all: unset; }
+
+// the panel's frame (notes.scss then opens its left side)
+.notes-panel {
+  background-color: $popup;
+  border: 1px solid darken($popup, $ring-dark-amount);
+  border-radius: 8px;
+  color: $text;
+  font-family: $font-text;
+  font-size: $font-size;
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.25);
+}
+
+.notes-panel .icon, .notes-btn.icon {
+  font-family: $font-icon;
+  font-weight: $icon-weight;
+  font-size: $icon-size;
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.6);
+}
+.notes-btn { border-radius: 6px; }
+
+// etched separator under the head
+.notes-panel .menu-sep {
+  min-height: 2px;
+  margin: 4px 6px;
+  background-color: $border;
+  box-shadow: inset 0 1px 0 0 darken($popup, 6%);   // a dark line above the light one
+}
+
+// List | New and Note | To-do list: raised segments, the chosen one pressed in
+.notes-panel {
+  .look-seg {
+    @include raised($pill);
+    padding: 4px 10px;
+    color: $subtle;
+    &:hover { @include hover($pill); color: $text; }
+    &:active, &.on, &.on:hover { @include pressed($pill); color: $accent; }
+  }
+  .look-first { border-radius: 6px 0 0 6px; }
+  .look-mid   { border-radius: 0; margin-left: -1px; }     // the edges share one seam
+  .look-last  { border-radius: 0 6px 6px 0; margin-left: -1px; }
+}

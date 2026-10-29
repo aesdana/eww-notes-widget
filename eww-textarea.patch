@@ -1,0 +1,218 @@
+eww: add a multi-line `textarea` widget, pass input text on stdin, selectable labels
+
+Base: elkowar/eww 48f5aa8 (switch yolk link to website rather than git repo)
+Apply: git apply eww-textarea.patch
+
+diff --git a/crates/eww/src/widgets/mod.rs b/crates/eww/src/widgets/mod.rs
+index 34abab0..8aab2a5 100644
+--- a/crates/eww/src/widgets/mod.rs
++++ b/crates/eww/src/widgets/mod.rs
+@@ -17,24 +17,56 @@ fn run_command<T>(timeout: std::time::Duration, cmd: &str, args: &[T])
+ where
+     T: 'static + std::fmt::Display + Send + Sync + Clone,
+ {
++    run_command_impl(timeout, cmd, args, None)
++}
++
++/// Like [`run_command`], but also writes `input` to the command's stdin and then closes it.
++/// Text typed by the user can be read from there safely: unlike the `{}` placeholder,
++/// it never becomes part of the shell command line (quotes, `$( )` and newlines stay plain text).
++fn run_command_with_input<T>(timeout: std::time::Duration, cmd: &str, args: &[T], input: String)
++where
++    T: 'static + std::fmt::Display + Send + Sync + Clone,
++{
++    run_command_impl(timeout, cmd, args, Some(input))
++}
++
++fn run_command_impl<T>(timeout: std::time::Duration, cmd: &str, args: &[T], input: Option<String>)
++where
++    T: 'static + std::fmt::Display + Send + Sync + Clone,
++{
++    use std::{io::Write, process::Stdio};
+     use wait_timeout::ChildExt;
+     let cmd = replace_placeholders(cmd, args);
+     std::thread::Builder::new()
+         .name("command-execution-thread".to_string())
+         .spawn(move || {
+             log::debug!("Running command from widget [timeout: {}ms]: {}", timeout.as_millis(), cmd);
+-            let child = Command::new("/bin/sh").arg("-c").arg(&cmd).spawn();
++            let mut command = Command::new("/bin/sh");
++            command.arg("-c").arg(&cmd);
++            if input.is_some() {
++                command.stdin(Stdio::piped());
++            }
++            let child = command.spawn();
+             match child {
+-                Ok(mut child) => match child.wait_timeout(timeout) {
+-                    // child timed out
+-                    Ok(None) => {
+-                        log::error!("WARNING: command {} timed out", &cmd);
+-                        let _ = child.kill();
+-                        let _ = child.wait();
++                Ok(mut child) => {
++                    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
++                        // in its own thread: a command that never reads a long input must not block the
++                        // timeout below. Not reading it at all is fine (the write just fails).
++                        std::thread::spawn(move || {
++                            let _ = stdin.write_all(input.as_bytes());
++                        });
++                    }
++                    match child.wait_timeout(timeout) {
++                        // child timed out
++                        Ok(None) => {
++                            log::error!("WARNING: command {} timed out", &cmd);
++                            let _ = child.kill();
++                            let _ = child.wait();
++                        }
++                        Err(err) => log::error!("Failed to execute command {}: {}", cmd, err),
++                        Ok(Some(_)) => {}
+                     }
+-                    Err(err) => log::error!("Failed to execute command {}: {}", cmd, err),
+-                    Ok(Some(_)) => {}
+-                },
++                }
+                 Err(err) => log::error!("Failed to launch child process: {}", err),
+             }
+         })
+diff --git a/crates/eww/src/widgets/widget_definitions.rs b/crates/eww/src/widgets/widget_definitions.rs
+index 8284d0f..3ce70f7 100644
+--- a/crates/eww/src/widgets/widget_definitions.rs
++++ b/crates/eww/src/widgets/widget_definitions.rs
+@@ -1,5 +1,5 @@
+ #![allow(clippy::option_map_unit_fn)]
+-use super::{build_widget::BuilderArgs, circular_progressbar::*, run_command, transform::*};
++use super::{build_widget::BuilderArgs, circular_progressbar::*, run_command, run_command_with_input, transform::*};
+ use crate::{
+     def_widget, enum_parse, error_handling_ctx,
+     util::{self, list_difference},
+@@ -73,6 +73,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
+     WIDGET_NAME_LABEL,
+     WIDGET_NAME_LITERAL,
+     WIDGET_NAME_INPUT,
++    WIDGET_NAME_TEXTAREA,
+     WIDGET_NAME_CALENDAR,
+     WIDGET_NAME_COLOR_BUTTON,
+     WIDGET_NAME_EXPANDER,
+@@ -103,6 +104,7 @@ pub(super) fn widget_use_to_gtk_widget(bargs: &mut BuilderArgs) -> Result<gtk::W
+         WIDGET_NAME_LABEL => build_gtk_label(bargs)?.upcast(),
+         WIDGET_NAME_LITERAL => build_gtk_literal(bargs)?.upcast(),
+         WIDGET_NAME_INPUT => build_gtk_input(bargs)?.upcast(),
++        WIDGET_NAME_TEXTAREA => build_gtk_textarea(bargs)?.upcast(),
+         WIDGET_NAME_CALENDAR => build_gtk_calendar(bargs)?.upcast(),
+         WIDGET_NAME_COLOR_BUTTON => build_gtk_color_button(bargs)?.upcast(),
+         WIDGET_NAME_EXPANDER => build_gtk_expander(bargs)?.upcast(),
+@@ -498,18 +500,20 @@ fn build_gtk_input(bargs: &mut BuilderArgs) -> Result<gtk::Entry> {
+         prop(value: as_string) {
+             gtk_widget.set_text(&value);
+         },
+-        // @prop onchange - Command to run when the text changes. The placeholder `{}` will be replaced by the value
++        // @prop onchange - Command to run when the text changes. The placeholder `{}` will be replaced by the value, which is also written to the command's stdin (safe for any text, unlike `{}`)
+         // @prop timeout - timeout of the command. Default: "200ms"
+         prop(timeout: as_duration = Duration::from_millis(200), onchange: as_string) {
+             connect_signal_handler!(gtk_widget, gtk_widget.connect_changed(move |gtk_widget| {
+-                run_command(timeout, &onchange, &[gtk_widget.text().to_string()]);
++                let text = gtk_widget.text().to_string();
++                run_command_with_input(timeout, &onchange, &[text.clone()], text);
+             }));
+         },
+-        // @prop onaccept - Command to run when the user hits return in the input field. The placeholder `{}` will be replaced by the value
++        // @prop onaccept - Command to run when the user hits return in the input field. The placeholder `{}` will be replaced by the value, which is also written to the command's stdin
+         // @prop timeout - timeout of the command. Default: "200ms"
+         prop(timeout: as_duration = Duration::from_millis(200), onaccept: as_string) {
+             connect_signal_handler!(gtk_widget, gtk_widget.connect_activate(move |gtk_widget| {
+-                run_command(timeout, &onaccept, &[gtk_widget.text().to_string()]);
++                let text = gtk_widget.text().to_string();
++                run_command_with_input(timeout, &onaccept, &[text.clone()], text);
+             }));
+         },
+         // @prop password - if the input is obscured
+@@ -520,6 +524,62 @@ fn build_gtk_input(bargs: &mut BuilderArgs) -> Result<gtk::Entry> {
+     Ok(gtk_widget)
+ }
+ 
++const WIDGET_NAME_TEXTAREA: &str = "textarea";
++/// @widget textarea
++/// @desc A multi-line text field: Enter starts a new line, Ctrl+Enter runs `onaccept`. Put it in a `scroll` for long texts. Commands get the text on their stdin; `{}` is replaced by it as well, but multi-line text is rarely safe in a command line. Style it with the `textview` and `textview text` css nodes. For this to be useful, set `focusable="true"` on the window.
++fn build_gtk_textarea(bargs: &mut BuilderArgs) -> Result<gtk::TextView> {
++    let gtk_widget = gtk::TextView::new();
++    def_widget!(bargs, _g, gtk_widget, {
++        // @prop value - the text. Setting the text that is already there does nothing (the cursor stays where it is)
++        prop(value: as_string) {
++            let buffer = gtk_widget.buffer().context("textarea without a text buffer")?;
++            if text_buffer_text(&buffer) != value {
++                buffer.set_text(&value);
++            }
++        },
++        // @prop onchange - Command to run when the text changes. The text is on its stdin
++        // @prop timeout - timeout of the command. Default: "200ms"
++        prop(timeout: as_duration = Duration::from_millis(200), onchange: as_string) {
++            let buffer = gtk_widget.buffer().context("textarea without a text buffer")?;
++            connect_signal_handler!(buffer, buffer.connect_changed(move |buffer| {
++                let text = text_buffer_text(buffer);
++                run_command_with_input(timeout, &onchange, &[text.clone()], text);
++            }));
++        },
++        // @prop onaccept - Command to run on Ctrl+Enter. The text is on its stdin
++        // @prop timeout - timeout of the command. Default: "200ms"
++        prop(timeout: as_duration = Duration::from_millis(200), onaccept: as_string) {
++            connect_signal_handler!(gtk_widget, gtk_widget.connect_key_press_event(move |gtk_widget, evt| {
++                let enter = evt.keyval() == gdk::keys::constants::Return || evt.keyval() == gdk::keys::constants::KP_Enter;
++                if !enter || !evt.state().contains(ModifierType::CONTROL_MASK) {
++                    return glib::Propagation::Proceed;
++                }
++                if let Some(buffer) = gtk_widget.buffer() {
++                    let text = text_buffer_text(&buffer);
++                    run_command_with_input(timeout, &onaccept, &[text.clone()], text);
++                }
++                glib::Propagation::Stop
++            }));
++        },
++        // @prop wrap-mode - how lines are wrapped. possible options: $wrap_mode. Default: "wordchar"
++        prop(wrap_mode: as_string = "wordchar") {
++            gtk_widget.set_wrap_mode(parse_text_wrap_mode(&wrap_mode)?);
++        },
++        // @prop editable - whether the text can be changed (it can always be selected and copied). Default: true
++        prop(editable: as_bool = true) {
++            gtk_widget.set_editable(editable);
++            gtk_widget.set_cursor_visible(editable);
++        }
++    });
++    Ok(gtk_widget)
++}
++
++/// The whole text of a text buffer.
++fn text_buffer_text(buffer: &gtk::TextBuffer) -> String {
++    let (start, end) = buffer.bounds();
++    buffer.text(&start, &end, true).map(|text| text.to_string()).unwrap_or_default()
++}
++
+ const WIDGET_NAME_BUTTON: &str = "button";
+ /// @widget button
+ /// @desc A button containing any widget as it's child. Events are triggered on release.
+@@ -1060,6 +1120,10 @@ fn build_gtk_label(bargs: &mut BuilderArgs) -> Result<gtk::Label> {
+         // @prop lines - maximum number of lines to display (only works when `limit-width` has a value). A value of -1 (default) disables the limit.
+         prop(lines: as_i32 = -1) {
+             gtk_widget.set_lines(lines);
++        },
++        // @prop selectable - whether the text can be selected (and copied) with the mouse. Default: false
++        prop(selectable: as_bool = false) {
++            gtk_widget.set_selectable(selectable);
+         }
+     });
+     Ok(gtk_widget)
+@@ -1413,6 +1477,15 @@ fn parse_gravity(g: &str) -> Result<gtk::pango::Gravity> {
+ }
+ 
+ /// @var wrap_mode - "word", "char", "wordchar"
++fn parse_text_wrap_mode(w: &str) -> Result<gtk::WrapMode> {
++    enum_parse! { "wrap-mode", w,
++        "none" => gtk::WrapMode::None,
++        "word" => gtk::WrapMode::Word,
++        "char" => gtk::WrapMode::Char,
++        "wordchar" => gtk::WrapMode::WordChar
++    }
++}
++
+ fn parse_wrap_mode(w: &str) -> Result<gtk::pango::WrapMode> {
+     enum_parse! { "wrap-mode", w,
+         "word" => gtk::pango::WrapMode::Word,

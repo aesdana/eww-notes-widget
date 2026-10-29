@@ -1,0 +1,132 @@
+// notes panel (notes.yuck, scripts/notes): a full-height dropdown-style panel on the left
+
+// bar button, raised like the launcher; pressed in while the panel is out
+.notes-gap { min-width: 6px; }
+button.pill.notes-btn {
+  @include raised($pill);
+  color: $grad-b;
+  padding: 0 12px;
+  &:hover { @include hover($pill); }
+  &:active, &.open, &.open:hover { @include pressed($pill); }
+}
+
+.notes-panel {
+  padding: 10px;
+  // flush with the left screen edge: no frame on that side, square corners there
+  border-left-width: 0;
+  border-radius: 0 8px 8px 0;
+  box-shadow: inset -1px 0 0 0 lighten($popup, $ring-light-amount),
+              inset 0 1px 0 0 lighten($popup, $ring-light-amount),
+              inset 0 -1px 0 0 lighten($popup, $ring-light-amount);
+
+  .nt-head { margin: 0 2px 6px; }
+  .nt-head-icon { color: $grad-b; min-width: 18px; }
+  .nt-title { font-weight: bold; }
+
+  // small icon buttons: close, clear, pin, tags, delete
+  .nt-act {
+    color: $subtle;
+    font-size: 11px;
+    padding: 3px 6px;
+    border-radius: 5px;
+    &:hover { background-color: $menu-hover; color: $text; }
+    &.on { color: $accent; }
+  }
+  .nt-del:hover { color: $c-danger; }
+
+  // one-line fields: sunken, like the slider grooves
+  .nt-input {
+    background-color: $trough;
+    border-radius: 5px;
+    padding: 5px 8px;
+    color: $text;
+    caret-color: $text;
+    text-shadow: none;
+    box-shadow: inset 0 1px 0 0 darken($trough, 3%), inset 0 -1px 0 0 lighten($pill, 1%);
+    selection { background-color: $accent; color: $bar; }
+  }
+  // multi-line field (eww's patched textarea, in a scroll): the scroll is the sunken box
+  .nt-area {
+    background-color: $trough;
+    border-radius: 5px;
+    padding: 5px 8px;
+    box-shadow: inset 0 1px 0 0 darken($trough, 3%), inset 0 -1px 0 0 lighten($pill, 1%);
+  }
+  .nt-textarea, .nt-textarea text {
+    background-color: transparent;
+    color: $text;
+    caret-color: $text;
+    text-shadow: none;
+  }
+  .nt-textarea text selection { background-color: $accent; color: $bar; }
+  // selectable note text on the cards
+  .nt-text selection, .nt-todo-title selection { background-color: $accent; color: $bar; }
+  .nt-search { margin: 8px 2px 6px; }
+  .nt-search-icon { color: $subtle; font-size: 11px; }
+
+  // tags: small raised chips, pressed in while they filter
+  .nt-tags { min-height: 28px; margin: 0 2px 6px; }
+  .nt-chip {
+    @include raised($pill);
+    border-radius: 10px;
+    padding: 2px 9px;
+    color: $subtle;
+    font-size: 0.9em;
+    &:hover { @include hover($pill); color: $text; }
+    &.on, &.on:hover { @include pressed($pill); color: $accent; }
+  }
+  .nt-chips .nt-chip { @include raised(lighten($pill, 3%)); }   // on a card: a step lighter
+  .nt-chips .nt-chip:hover { @include hover(lighten($pill, 3%)); }
+
+  // the notes: flat cards; a pinned one has an accent edge on the left
+  .nt-list { margin: 0 2px; }
+  .nt-note {
+    background-color: $pill;
+    border-radius: 6px;
+    padding: 8px 8px 8px 10px;
+    &.pinned { box-shadow: inset 2px 0 0 0 $accent; }
+  }
+  .nt-text { color: $text; }
+  .nt-todo-title { font-weight: bold; }
+  .nt-progress { color: $subtle; font-size: 0.9em; }
+  // to-do rows: the pencil and × only show while the pointer is on the row
+  .nt-row {
+    border-radius: 5px;
+    &:hover { background-color: lighten($pill, 3%); }
+    .nt-row-act { color: transparent; text-shadow: none; padding: 3px 5px; }
+    .nt-row-act.on { color: $accent; }
+  }
+  .nt-row:hover .nt-row-act { color: $subtle; text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.6); }
+  .nt-row:hover .nt-row-act:hover { color: $text; }
+  .nt-row:hover .nt-del:hover { color: $c-danger; }
+  .nt-item {
+    border-radius: 5px;
+    padding: 3px 4px;
+    .nt-box { color: $accent; font-size: 12px; min-width: 14px; margin-top: 1px; }
+    .nt-box.open { font-weight: 400; }        // Font Awesome Regular: the empty outline square
+    &.done .nt-item-text { color: $muted; text-decoration-line: line-through; }
+  }
+  // the field under the list (add items / edit tags)
+  .nt-composer { margin: 6px 0 0; }        // right under the note being edited
+  .nt-composer .nt-caption { margin: 0; }
+  .nt-field-icon { color: $subtle; font-size: 10px; min-width: 14px; margin-left: 4px; }
+  .nt-chips { margin-top: 2px; }
+  .nt-foot { margin: 0 -4px -4px 0; }      // the buttons' own padding: flush with the card's corner
+  .nt-empty { color: $subtle; padding: 10px 2px; }
+  .nt-count { color: $subtle; font-size: 0.9em; margin: 8px 4px 0; }
+
+  // New
+  .nt-new { margin: 8px 2px 0; }
+  .nt-kind { margin-bottom: 6px; }
+  .nt-caption { color: $subtle; margin: 6px 2px 3px; }
+  .nt-hint { color: $muted; font-size: 0.9em; margin: 6px 2px 0; }
+  .nt-create {
+    @include raised($pill);
+    border-radius: 6px;
+    padding: 6px;
+    margin-top: 12px;
+    &:hover { @include hover($pill); }
+    &:active { @include pressed($pill); }
+    .icon { color: $accent; font-size: 11px; }
+  }
+}
